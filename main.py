@@ -1,29 +1,43 @@
 import os
+import json
+import random
+import re
 from pathlib import Path
+from tqdm import tqdm
+import tiktoken  # Install with `pip install tiktoken`
+from together import Together
 from docling.document_converter import DocumentConverter
 
+class Config:
+    def __init__(self):
+        self.CHUNK_SIZE = 512  # Adjusted for RAG optimization
+        self.SYSTEM_PROMPTS = [
+            'You are an expert aquaculture researcher with extensive knowledge of marine biology, fish farming, and sustainable aquaculture practices.',
+            'You are a specialized AI assistant with deep expertise in aquaculture science, focusing on research methodology, water quality management, and aquatic species cultivation.',
+            'You are an aquaculture specialist with comprehensive knowledge of both theoretical and practical aspects of aquatic farming systems.'
+        ]
+
 class DoclingProcessor:
-    def __init__(self, input_folder, output_folder="processed_documents"):
+    def __init__(self, input_folder="research_papers", markdown_folder="extracted_markdown"):
         self.input_folder = input_folder
-        self.output_folder = output_folder
-        os.makedirs(self.output_folder, exist_ok=True)
-        
+        self.markdown_folder = markdown_folder
+        os.makedirs(self.markdown_folder, exist_ok=True)
+
         # Initialize Docling Converter
         self.converter = DocumentConverter()
 
     def process_documents(self):
-        """Processes all documents in the input folder."""
+        """Processes all PDFs in the input folder and converts them to Markdown."""
         for file in os.listdir(self.input_folder):
             file_path = os.path.join(self.input_folder, file)
-            if file.endswith((".pdf", ".jpg", ".png")):
+            if file.endswith(".pdf"):
                 self.process_file(file_path)
 
     def process_file(self, file_path):
-        """Converts a document using Docling and saves as Markdown."""
-        print(f"Processing: {file_path}")
+        """Converts a document using Docling and saves it as Markdown."""
+        print(f"📄 Processing PDF: {file_path}")
 
         try:
-            # Convert document to Docling format
             result = self.converter.convert(file_path)
             doc = result.document
             
@@ -34,21 +48,173 @@ class DoclingProcessor:
             self.save_output(file_path, markdown_content)
 
         except Exception as e:
-            print(f"Error processing {file_path}: {e}")
+            print(f"❌ Error processing {file_path}: {e}")
 
     def save_output(self, file_path, markdown_content):
-        """Saves converted text as a Markdown file."""
+        """Saves extracted text as a Markdown file."""
         filename = Path(file_path).stem
-        md_path = os.path.join(self.output_folder, f"{filename}.md")
+        md_path = os.path.join(self.markdown_folder, f"{filename}.md")
 
-        # Save Markdown file
         with open(md_path, "w", encoding="utf-8") as md_file:
             md_file.write(markdown_content)
 
-        print(f"Saved: {md_path}")
+        print(f"✅ Saved Markdown: {md_path}")
 
-# Run the processor
+class MarkdownProcessor:
+    def __init__(self, jsonl_folder="jsonl_output", json_output_path="chunked_output.json"):
+        """Initialize with Together AI API key and setup JSON and JSONL output files."""
+        self.config = Config()
+        self.jsonl_folder = jsonl_folder
+        self.json_output_path = json_output_path
+        self.client = Together(api_key="64b179a6566d904ca5d70b70adb3be49f997a01a15f5f7fa9978b330936331c1")
+
+        # Create output folders
+        os.makedirs(self.jsonl_folder, exist_ok=True)
+
+        # Token tracking
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.total_tokens = 0
+
+    def read_markdown_file(self, md_path: str) -> str:
+        """Read content from markdown file."""
+        if not os.path.exists(md_path):
+            raise FileNotFoundError(f"Markdown file not found: {md_path}")
+            
+        with open(md_path, 'r', encoding='utf-8') as file:
+            return file.read()
+
+    def split_into_chunks(self, content: str):
+        """Split markdown content into logical chunks optimized for RAG."""
+        chunks = []
+        chunk_id = 1
+        current_chunk = []
+        current_size = 0
+
+        for line in content.split('\n'):
+            if line.strip().startswith('#'):  # Header detected
+                if current_chunk:
+                    chunks.append({
+                        "chunk_id": str(chunk_id),
+                        "text": '\n'.join(current_chunk)
+                    })
+                    chunk_id += 1
+                current_chunk = [line]
+                current_size = len(line)
+            else:
+                if current_size + len(line) > self.config.CHUNK_SIZE:
+                    chunks.append({
+                        "chunk_id": str(chunk_id),
+                        "text": '\n'.join(current_chunk)
+                    })
+                    chunk_id += 1
+                    current_chunk = [line]
+                    current_size = len(line)
+                else:
+                    current_chunk.append(line)
+                    current_size += len(line)
+
+        if current_chunk:
+            chunks.append({
+                "chunk_id": str(chunk_id),
+                "text": '\n'.join(current_chunk)
+            })
+
+        return chunks
+
+    def generate_qa_pairs(self, text: str):
+        """Generate Q&A pairs from markdown content using Together AI API."""
+        prompt = f"""
+        Given the following text from a technical document, generate 3-4 detailed question-answer pairs.
+        Focus on key concepts, methodologies, and important technical details.
+
+        Text:
+        {text}
+
+        Generate the response in this exact JSON format:
+        [
+            {{"question": "Detailed question about the content?", "answer": "Comprehensive answer from the content..."}}
+        ]
+        """
+
+        prompt_tokens = len(self.tokenizer.encode(prompt))
+        self.total_tokens += prompt_tokens
+
+        try:
+            response = self.client.chat.completions.create(
+                model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            response_text = response.choices[0].message.content
+            response_tokens = len(self.tokenizer.encode(response_text))
+            self.total_tokens += response_tokens
+
+            return json.loads(response_text)
+
+        except Exception as e:
+            print(f"❌ Error generating Q&A pairs: {e}")
+            return []
+
+    def extract_metadata(self, md_path: str):
+        """Extract metadata like document title, author, and date (placeholder for now)."""
+        filename = Path(md_path).stem
+        return {
+            "document_id": filename,
+            "title": filename.replace("_", " "),
+            "author": "Unknown",
+            "published_date": "2025-03-09",
+            "metadata": {
+                "source": "Research Paper",
+                "tokens_per_chunk": self.config.CHUNK_SIZE
+            }
+        }
+
+    def process_markdown(self, markdown_folder):
+        """Process Markdown to generate Q&A JSONL and structured chunked JSON."""
+        md_files = [f for f in os.listdir(markdown_folder) if f.endswith('.md')]
+        documents = []
+
+        for md_file in tqdm(md_files, desc="Processing Markdown"):
+            md_path = os.path.join(markdown_folder, md_file)
+            jsonl_path = os.path.join(self.jsonl_folder, f"{Path(md_file).stem}.jsonl")
+
+            try:
+                content = self.read_markdown_file(md_path)
+                chunks = self.split_into_chunks(content)
+                metadata = self.extract_metadata(md_path)
+
+                # Generate Q&A JSONL
+                with open(jsonl_path, 'w', encoding='utf-8') as jsonl_file:
+                    for chunk in chunks:
+                        qa_pairs = self.generate_qa_pairs(chunk["text"])
+                        for qa in qa_pairs:
+                            jsonl_entry = {
+                                "messages": [
+                                    {"role": "user", "content": qa["question"]},
+                                    {"role": "assistant", "content": qa["answer"]}
+                                ]
+                            }
+                            jsonl_file.write(json.dumps(jsonl_entry) + '\n')
+
+                # Save structured JSON
+                document = {**metadata, "chunks": chunks}
+                documents.append(document)
+
+            except Exception as e:
+                print(f"❌ Error processing {md_path}: {e}")
+
+        with open(self.json_output_path, 'w', encoding='utf-8') as json_file:
+            json.dump(documents, json_file, indent=4)
+
+        print(f"✅ JSONL and JSON saved successfully.")
+        print(f"📊 Total API Tokens Used: {self.total_tokens}")
+
+def main():
+    pdf_processor = DoclingProcessor()
+    pdf_processor.process_documents()
+
+    processor = MarkdownProcessor()
+    processor.process_markdown("extracted_markdown")
+
 if __name__ == "__main__":
-    input_folder = "research_papers"  # Make sure to put your PDFs/images here
-    processor = DoclingProcessor(input_folder)
-    processor.process_documents()
+    main()

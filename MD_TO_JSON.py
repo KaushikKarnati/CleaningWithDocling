@@ -4,6 +4,7 @@ import random
 import re
 from pathlib import Path
 from tqdm import tqdm
+import tiktoken  # Install with `pip install tiktoken`
 from together import Together
 from docling.document_converter import DocumentConverter
 
@@ -33,7 +34,7 @@ class DoclingProcessor:
                 self.process_file(file_path)
 
     def process_file(self, file_path):
-        """Converts a document using Docling and saves as Markdown."""
+        """Converts a document using Docling and saves it as Markdown."""
         print(f"📄 Processing PDF: {file_path}")
 
         try:
@@ -64,9 +65,11 @@ class MarkdownToChunkedJSON:
         """Initialize with Together AI API key and setup JSON output file."""
         self.config = Config()
         self.json_output_path = json_output_path
-
-        # Initialize Together AI API
         self.client = Together(api_key="64b179a6566d904ca5d70b70adb3be49f997a01a15f5f7fa9978b330936331c1")
+
+        # Token tracking
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Uses OpenAI's tokenizer
+        self.total_tokens = 0  # Keeps track of API token usage
 
     def read_markdown_file(self, md_path: str) -> str:
         """Read content from markdown file."""
@@ -105,7 +108,7 @@ class MarkdownToChunkedJSON:
                 else:
                     current_chunk.append(line)
                     current_size += len(line)
-        
+
         if current_chunk:
             chunks.append({
                 "chunk_id": str(chunk_id),
@@ -157,13 +160,14 @@ class MarkdownToChunkedJSON:
             json.dump(documents, json_file, indent=4)
 
         print(f"✅ Saved Chunked JSON output: {self.json_output_path}")
+        print(f"📊 Total API Tokens Used: {self.total_tokens}")  # Print total token count
 
 def main():
     # Step 1: Convert PDFs to Markdown
     pdf_processor = DoclingProcessor()
     pdf_processor.process_documents()
 
-    # Step 2: Convert Markdown to Chunked JSON
+    # Step 2: Convert Markdown to Chunked JSON with Token Tracking
     json_converter = MarkdownToChunkedJSON()
     json_converter.convert_to_chunked_json("extracted_markdown")
 
