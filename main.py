@@ -66,7 +66,7 @@ class MarkdownProcessor:
         self.config = Config()
         self.jsonl_folder = jsonl_folder
         self.json_output_path = json_output_path
-        self.client = Together(api_key="64b179a6566d904ca5d70b70adb3be49f997a01a15f5f7fa9978b330936331c1")
+        self.client = Together(api_key="460dca699fe36c30c2ab1660849b9f73fca60844ad1ce850d952dee816d9d22a")
 
         # Create output folders
         os.makedirs(self.jsonl_folder, exist_ok=True)
